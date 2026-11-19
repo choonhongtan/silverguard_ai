@@ -70,7 +70,7 @@ def preprocess_text(raw_text: str) -> tf.Tensor:
 
 
 def predict_scam(raw_text: str):
-    """Executes prediction with complete runtime error handling."""
+    """Executes prediction with explicit scalar extraction via .item()."""
     if not raw_text.strip():
         return None, "Empty message provided."
 
@@ -78,12 +78,14 @@ def predict_scam(raw_text: str):
         input_tensor = preprocess_text(raw_text)
         prediction_raw = ml_engine.predict(input_tensor, verbose=0)
 
-        risk_score = float(prediction_raw)
-        label = "HIGH SCAM RISK" if risk_score >= 0.65 else "SAFE MESSAGE"
-        return risk_score, label
-    except Exception as exc:
-        st.error(f"Execution Error during prediction: {str(exc)}")
-        return None, "Error"
+        # DEFENSIVE ASSERT: Verify the 2D tensor shape before extraction
+        assert prediction_raw.shape == (1, 1), f"Expected shape (1, 1), got {prediction_raw.shape}"
+
+        # SAFE SCALAR EXTRACTION: .item() extracts the float from the array array([[0.85]]) -> 0.85
+        risk_score = float(prediction_raw.item())
+        
+        # Enforce range invariant
+        assert 0.0 <= risk_score <= 1.0, f"Risk score out of bounds: {risk_score}"
 
 
 # ==========================================
