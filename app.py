@@ -87,6 +87,11 @@ def predict_scam(raw_text: str):
         # Enforce range invariant
         assert 0.0 <= risk_score <= 1.0, f"Risk score out of bounds: {risk_score}"
 
+        label = "HIGH SCAM RISK" if risk_score >= 0.65 else "SAFE MESSAGE"
+        return risk_score, label
+    except Exception as exc:
+        st.error(f"Execution Error during prediction: {str(exc)}")
+        return None, "Error"
 
 # ==========================================
 # SECTION 3: FRONTEND UI (STREAMLIT)
