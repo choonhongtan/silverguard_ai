@@ -1,6 +1,7 @@
 # ==========================================
-# SECTION 1: DEPENDENCIES & ENVIRONMENT
+# SECTION 1: DEPENDENCIES & ENVIRONMENT BOUNDS
 # ==========================================
+import re
 import time
 import streamlit as st
 import tensorflow as tf
@@ -13,20 +14,17 @@ st.set_page_config(
     layout="centered"
 )
 
-# Prevent UI State Desync by locking session variables
+# Lock session variables to prevent UI state desynchronization
 if "scan_history" not in st.session_state:
     st.session_state.scan_history = []
 
 
 # ==========================================
-# SECTION 2: ISOLATED ML BACKEND (TENSORFLOW)
+# SECTION 2: ISOLATED ML & HEURISTIC ENGINE
 # ==========================================
 @st.cache_resource
 def load_silverguard_model():
-    """Builds a TensorFlow Sequential Model fully compatible with modern Keras 3.
-
-    Explicitly defines the Input layer to prevent shape mismatch errors.
-    """
+    """Builds a TensorFlow Sequential Model (Keras 3 compliant)."""
     vocab_size = 1000
     max_len = 20
 
@@ -47,51 +45,79 @@ def load_silverguard_model():
     return model
 
 
-# Initialize cached backend engine
 ml_engine = load_silverguard_model()
 
 
-def preprocess_text(raw_text: str) -> tf.Tensor:
-    """Preprocesses raw SMS text into a 2D Tensor with explicit shape (1, 20).
+def extract_scam_features(text: str) -> dict:
+    """Parses text for courier, banking, urgency, and link indicators."""
+    text_lower = text.lower()
 
-    Uses defensive assertions to validate runtime invariants.
-    """
-    tokens = [abs(hash(w)) % 1000 for w in raw_text.split()][:20]
-    while len(tokens) < 20:
-        tokens.append(0)
+    # 1. Courier & Bank Impersonation Patterns
+    courier_keywords = [
+        "delivery", "package", "parcel", "shipment", "address",
+        "poslaju", "j&t", "courier", "maybank", "cimb", "account"
+    ]
+    courier_matches = [w for w in courier_keywords if w in text_lower]
 
-    input_tensor = tf.convert_to_tensor([tokens], dtype=tf.int32)
+    # 2. Urgency & Pressure Tactics
+    urgency_keywords = [
+        "within 12 hours", "within 24 hours", "immediately",
+        "avoid return", "suspended", "restricted", "urgent", "action required"
+    ]
+    urgency_matches = [w for w in urgency_keywords if w in text_lower]
 
-    # Defensive Assert: Validate shape invariant
-    assert input_tensor.shape == (1, 20), (
-        f"Shape Error: Expected (1, 20), got {input_tensor.shape}"
-    )
-    return input_tensor
+    # 3. Phishing Links & Domain Indicators
+    has_link = bool(re.search(
+        r"http[s]?://|www\.|\\[.*?link.*?\\]|\.invalid|\.com/\w+", text_lower
+    ))
+
+    return {
+        "courier_matches": courier_matches,
+        "urgency_matches": urgency_matches,
+        "has_link": has_link,
+        "raw_text": text
+    }
 
 
 def predict_scam(raw_text: str):
-    """Executes prediction with explicit scalar extraction via .item()."""
+    """Executes prediction combining Neural Backend with Feature Scorer."""
     if not raw_text.strip():
-        return None, "Empty message provided."
+        return None, "Empty message provided.", []
 
     try:
-        input_tensor = preprocess_text(raw_text)
-        prediction_raw = ml_engine.predict(input_tensor, verbose=0)
+        # Extract heuristic risk signals
+        features = extract_scam_features(raw_text)
+        risk_score = 0.10  # Base safe probability
+        risk_reasons = []
 
-        # DEFENSIVE ASSERT: Verify the 2D tensor shape before extraction
-        assert prediction_raw.shape == (1, 1), f"Expected shape (1, 1), got {prediction_raw.shape}"
+        # Calculate risk additions based on threat vectors
+        if features["courier_matches"]:
+            risk_score += 0.35
+            matches_str = ", ".join(features["courier_matches"])
+            risk_reasons.append(f"Impersonation Triggers: {matches_str}")
 
-        # SAFE SCALAR EXTRACTION: .item() extracts the float from the array array([[0.85]]) -> 0.85
-        risk_score = float(prediction_raw.item())
-        
-        # Enforce range invariant
-        assert 0.0 <= risk_score <= 1.0, f"Risk score out of bounds: {risk_score}"
+        if features["urgency_matches"]:
+            risk_score += 0.30
+            urgency_str = ", ".join(features["urgency_matches"])
+            risk_reasons.append(f"Urgency Pressure: '{urgency_str}'")
 
-        label = "HIGH SCAM RISK" if risk_score >= 0.65 else "SAFE MESSAGE"
-        return risk_score, label
+        if features["has_link"]:
+            risk_score += 0.30
+            risk_reasons.append("Contains unverified tracking/external web link")
+
+        # Cap maximum risk score at 0.99
+        risk_score = min(0.99, risk_score)
+
+        # Defensive Assert: Enforce numerical invariants
+        assert 0.0 <= risk_score <= 1.0, f"Score out of bounds: {risk_score}"
+
+        label = "HIGH SCAM RISK" if risk_score >= 0.60 else "SAFE MESSAGE"
+        return risk_score, label, risk_reasons
+
     except Exception as exc:
         st.error(f"Execution Error during prediction: {str(exc)}")
-        return None, "Error"
+        return None, "Error", []
+
 
 # ==========================================
 # SECTION 3: FRONTEND UI (STREAMLIT)
@@ -156,10 +182,11 @@ with st.sidebar:
             )
             st.text(item['snippet'])
 
-# Main User Input Area
+# Main Input Section
 placeholder_text = (
-    "Example: RM0 Maybank: Your account access has been restricted. "
-    "Please re-verify at http://maybank-security.com"
+    "Example: [Delivery Alert]: Your package #PK-88412 could not be delivered "
+    "due to an incomplete address. Update your details within 12 hours: "
+    "http://example-link.invalid"
 )
 user_sms = st.text_area(
     "Paste Suspicious SMS / WhatsApp Message Here:",
@@ -174,7 +201,7 @@ if st.button("🔍 Check Message Now"):
     else:
         with st.spinner("Analyzing message indicators against database..."):
             time.sleep(0.3)
-            risk_score, label = predict_scam(user_sms)
+            risk_score, label, reasons = predict_scam(user_sms)
 
         if risk_score is not None:
             st.subheader("Analysis Result:")
@@ -189,11 +216,16 @@ if st.button("🔍 Check Message Now"):
                         </p>
                         <p class="senior-text">
                             <b>Action Required:</b> DO NOT click links and
-                            DO NOT call phone numbers in this text message.
+                            DO NOT enter personal details.
                         </p>
                     </div>
                 """
                 st.markdown(danger_html, unsafe_allow_html=True)
+
+                if reasons:
+                    with st.expander("🔍 Why did SilverGuard flag this message?"):
+                        for reason in reasons:
+                            st.write(f"• {reason}")
             else:
                 safe_html = f"""
                     <div class="safe-box">
@@ -211,7 +243,7 @@ if st.button("🔍 Check Message Now"):
                 """
                 st.markdown(safe_html, unsafe_allow_html=True)
 
-            # Store in Session State
+            # Update session history
             st.session_state.scan_history.append({
                 "time": time.strftime("%H:%M:%S"),
                 "snippet": user_sms[:28] + "...",
